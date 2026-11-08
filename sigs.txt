@@ -1,0 +1,619 @@
+﻿### long_clips.py
+PER_PAGE = 30
+class ClipReport(BaseModel):
+def score_long(c, needed: float) -> float:
+    s = 100.0 if c.width >= c.height else 0.0
+def pick_long(candidates, needed: float, used) -> object | None:
+    pool = [c for c in candidates if c.id not in used]
+def long_query_options(scene, title: str) -> list[str]:
+    q = " ".join(scene.search_query.split())
+    vis = " ".join(scene.visual_description.split()[:4])
+    out = []
+        cand = " ".join(cand.split())
+def _load(path):
+def _save(path, clips):
+def collect_long_clips(board, client, api_key=None, cache_dir=None, run_dir=None, max_scenes=None,
+                       progress=print, search_fn=px.search_videos, download_fn=px.download_clip,
+                       sleep=time.sleep, throttle: float = 0.65):
+    out_file = Path(run_dir) / "clips.json" if run_dir else None
+    saved = _load(out_file) if out_file else {}
+    report = ClipReport()
+    scenes = board.scenes[:max_scenes]
+        prior = saved.get(scene.number)
+                cands = search_fn(q, client, api_key=api_key, cache_dir=cache_dir, per_page=PER_PAGE, sleep=sleep)
+            chosen = pick_long(cands, scene.duration, used)
+                used_query = q
+            path = download_fn(chosen, client, cache_dir=cache_dir, sleep=sleep)
+            clip = SceneClip(scene_number=scene.number, clip_id=chosen.id, path=str(path), query=used_query,
+                             width=chosen.width, height=chosen.height, duration=chosen.duration,
+                             portrait=chosen.is_portrait, page_url=chosen.page_url, author=getattr(chosen, "author", ""))
+            oldest = min(result, key=lambda c: last_use.get(c.clip_id, 0))
+            clip = oldest.model_copy(update={"scene_number": scene.number})
+### long_factcheck.py
+SEARCH_NOTE = ("\n\nUse Google Search to verify each claim against reliable sources before judging it. "
+class ChapterFact(BaseModel):
+class LongFactReport(BaseModel):
+    def grounded(self) -> bool:
+    def sources(self) -> list[str]:
+    def fixed_scenes(self) -> list[int]:
+    def unresolved_wrong(self) -> list[ClaimCheck]:
+        fixed = set(self.fixed_scenes)
+    def needs_review(self) -> bool:
+    def to_fact_report(self) -> FactCheckReport:
+        claims = [k for c in self.chapters for k in c.claims]
+        err = f"{len(self.unchecked)} chapter jaanch nahi hue" if self.unchecked else None
+    def summary(self) -> str:
+        claims = [k for c in self.chapters for k in c.claims]
+        wrong = sum(1 for k in claims if k.verdict == "wrong")
+        doubt = sum(1 for k in claims if k.verdict == "doubtful")
+        how = "web search se" if self.grounded else "Gemini ke knowledge se (web search nahi)"
+        extra = f", {len(self.unchecked)} chapter jaanch nahi hue" if self.unchecked else ""
+def _env_on(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+def extract_json(text):
+    text = (text or "").strip()
+        data = json.loads(text[i:j + 1])
+def make_grounded_fn(gemini):
+    def fn(prompt):
+        cfg = types.GenerateContentConfig(
+            system_instruction=FACT_SYSTEM, temperature=0.2,
+            tools=[types.Tool(google_search=types.GoogleSearch())])
+        resp = gemini._client.models.generate_content(model=gemini.model, contents=prompt, config=cfg)
+        sources = []
+                meta = getattr(cand, "grounding_metadata", None)
+                    web = getattr(ch, "web", None)
+def _plain(gemini, prompt) -> dict:
+def fact_check_long(script: LongScript, gemini, run_dir=None, grounded_fn=None, grounded=None,
+                    auto_fix=None, progress=print):
+    board = script.storyboard
+    auto_fix = _env_on("LONG_FACTCHECK_AUTOFIX") if auto_fix is None else auto_fix
+    use_web = _env_on("LONG_FACTCHECK_GROUNDED") if grounded is None else grounded
+            grounded_fn = make_grounded_fn(gemini)
+            grounded_fn = None
+    state = {"web": use_web and grounded_fn is not None}
+    run = Path(run_dir) if run_dir else None
+    report = LongFactReport()
+        path = run / f"long_fact_{idx:02d}.json" if run else None
+        saved = None
+                saved = ChapterFact.model_validate_json(path.read_text(encoding="utf-8"))
+                saved = None
+        sub = board.model_copy(update={"scenes": [s for s in board.scenes
+        used_web = {"v": False}
+        def ask(prompt):
+                    data = extract_json(text)
+                        data = _plain(gemini, "Convert this fact-check into the required JSON. Keep every claim; "
+        old = {s.number: s.narration for s in sub.scenes}
+        fixes = {s.number: s.narration for s in new_sub.scenes if s.narration != old[s.number]}
+        fact = ChapterFact(index=idx, title=info.title, grounded=used_web["v"], sources=list(dict.fromkeys(sources)),
+                           claims=rep.claims, fixes=fixes)
+        board = board.model_copy(update={"scenes": [s.model_copy(update={"narration": fixes_all[s.number]})
+### long_narration.py
+MAX_SPREAD_DB = 6.0
+class NarrationConfig(BaseModel):
+    def from_env(cls) -> "NarrationConfig":
+        rate = (_raw("LONG_VOICE_RATE") or "+0%").strip()
+            rate = "+0%"
+                   scene_pause=_env("LONG_SCENE_PAUSE", 0.15, float),
+                   chapter_pause=_env("LONG_CHAPTER_PAUSE", 0.7, float),
+                   target_lufs=_env("LONG_TARGET_LUFS", -16.0, float))
+_RULES = [
+def prepare_text(text: str, language: str = "English") -> str:
+    text = re.sub(r"[*#_`]+", "", text or "")
+            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+def parse_mean_volume(stderr: str):
+    m = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", stderr or "")
+def _ffmpeg(args, what):
+    r = subprocess.run(["ffmpeg", "-y", "-nostdin", "-loglevel", "error", *args], capture_output=True, text=True)
+def measure_volume(path):
+    r = subprocess.run(["ffmpeg", "-nostdin", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+                       capture_output=True, text=True)
+def process_scene(path, gain_db: float, pad_seconds: float) -> None:
+    path = Path(path)
+    filters = []
+    tmp = path.with_suffix(".proc.mp3")
+def normalize_loudness(path, lufs: float) -> None:
+    path = Path(path)
+    tmp = path.with_suffix(".norm.mp3")
+class SceneMeta(BaseModel):
+class NarrationReport(BaseModel):
+    def summary(self) -> str:
+        spread = f"{self.loudness_spread_db:.1f} dB" if self.loudness_spread_db is not None else "?"
+def _load_meta(path):
+def generate_long_voiceover(script: LongScript, out_dir, cfg=None, max_scenes=None, synth=edge_synthesize,
+                            duration_fn=audio_duration, trim_fn=trim_audio, measure_fn=measure_volume,
+                            process_fn=process_scene, concat_fn=concat_audio, normalize_fn=normalize_loudness,
+                            max_attempts=3, sleep=time.sleep, progress=print):
+    cfg = cfg or NarrationConfig.from_env()
+    board = script.storyboard
+    scenes = board.scenes[:max_scenes]
+    voice = pick_voice(board.language, cfg.voice)
+    out = Path(out_dir)
+        meta = _load_meta(js)
+        spoken = prepare_text(sc.narration, board.language)
+        words = _synth_with_retry(synth, spoken, voice, cfg.rate, mp3, max_attempts, sleep)
+        duration = round(duration_fn(mp3), 3)
+            trim = silence_trim(words, duration)
+                words = shift_words(words, -trim[0])
+                duration = round(duration_fn(mp3), 3)
+            words = fallback_word_timings(spoken, duration)
+        meta = SceneMeta(audio=SceneAudio(number=sc.number, path=str(mp3), start_offset=0.0, duration=duration,
+                                          words=words), mean_db=measure_fn(mp3), spoken=spoken)
+    levels = [m.mean_db for m in metas if m.mean_db is not None]
+    median = statistics.median(levels) if levels else None
+    chapter_ends = {c.last_scene for c in script.chapters}
+    last_no = scenes[-1].number
+    gains = 0
+        no = m.audio.number
+        gain = 0.0
+            gain = max(-cfg.max_gain_db, min(cfg.max_gain_db, median - m.mean_db))
+            gain = gain if abs(gain) >= 1.0 else 0.0
+        pause = 0.0 if no == last_no else (cfg.chapter_pause if no in chapter_ends else cfg.scene_pause)
+    offset = 0.0
+    full = out / "voiceover.mp3"
+    vo = Voiceover(path=str(full), voice=voice, duration=round(offset, 3), scenes=final)
+    rep = NarrationReport(voice=voice, rate=cfg.rate, scenes=len(final), duration=vo.duration, gains_applied=gains)
+            span = s.words[-1].end - s.words[0].start
+            wpm = len(s.words) / span * 60 if span > 0 else 0
+        ratio = vo.duration / rep.target_seconds
+### long_research.py
+RESEARCH_SYSTEM = (
+SEARCH_NOTE = ("\n\nUse Google Search to find and verify these facts in reliable sources. "
+MAX_FACTS_PER_CHAPTER = 8
+class ResearchFactDraft(BaseModel):
+class ChapterResearchDraft(BaseModel):
+class ResearchDraft(BaseModel):
+class ResearchFact(BaseModel):
+class ChapterResearch(BaseModel):
+class ResearchReport(BaseModel):
+    def total_facts(self) -> int:
+    def facts_for(self, idx0: int) -> list[str]:
+    def summary(self) -> str:
+        how = "web search se" if self.grounded else "Gemini ke knowledge se (web search nahi)"
+def _on(name: str, default: bool = True) -> bool:
+    raw = _raw(name)
+def research_prompt(topic: str, outline: Outline) -> str:
+    lines = []
+        pts = "; ".join(c.key_points)
+def make_research_grounded_fn(gemini):
+    def fn(prompt):
+        cfg = types.GenerateContentConfig(
+            system_instruction=RESEARCH_SYSTEM, temperature=0.2,
+            tools=[types.Tool(google_search=types.GoogleSearch())])
+        resp = gemini._client.models.generate_content(model=gemini.model, contents=prompt, config=cfg)
+        sources = []
+                meta = getattr(cand, "grounding_metadata", None)
+                    web = getattr(ch, "web", None)
+def _parse(text):
+    text = text or ""
+        draft = ResearchDraft.model_validate_json(text[i:j + 1])
+def research_long(topic, outline: Outline, gemini, language="English", run_dir=None, grounded_fn=None,
+                  grounded=None, progress=print) -> ResearchReport:
+    run = Path(run_dir) if run_dir else None
+    path = run / "long_research.json" if run else None
+            saved = ResearchReport.model_validate_json(path.read_text(encoding="utf-8"))
+            saved = None
+    n = len(outline.chapters)
+    use_web = _on("LONG_RESEARCH_GROUNDED") if grounded is None else grounded
+            grounded_fn = make_research_grounded_fn(gemini)
+            grounded_fn = None
+    prompt = research_prompt(topic, outline)
+            draft = _parse(text)
+                draft = gemini.generate_json("Convert this research into the required JSON. Keep every fact.\n\n"
+            draft = gemini.generate_json(prompt, ResearchDraft, system=RESEARCH_SYSTEM, temperature=0.2)
+            seen = {f.fact for f in by_idx.get(c.chapter, [])}
+                text_ = " ".join((f.fact or "").split())
+    chapters = [ChapterResearch(index=i, facts=by_idx[i][:MAX_FACTS_PER_CHAPTER]) for i in sorted(by_idx)]
+    report = ResearchReport(topic=topic, grounded=used_web, chapters=chapters,
+                            sources=list(dict.fromkeys(sources)), warnings=warnings)
+### long_script.py
+class LongScriptError(RuntimeError):
+def _dotenv_value(name):
+            line = line.strip()
+def _raw(name):
+    raw = os.getenv(name)
+def _env(name, default, cast):
+    raw = _raw(name)
+class LongConfig(BaseModel):
+    def from_env(cls) -> "LongConfig":
+            words_per_minute=_env("LONG_WORDS_PER_MINUTE", 150, int),
+            scene_seconds=_env("LONG_SCENE_SECONDS", 7.0, float),
+            max_scene_words=_env("LONG_MAX_SCENE_WORDS", 32, int),
+            min_minutes=_env("LONG_MIN_MINUTES", 3.0, float),
+            max_minutes=_env("LONG_MAX_MINUTES", 20.0, float),
+            max_scenes=_env("LONG_MAX_SCENES", 150, int),
+            model=_raw("LONG_GEMINI_MODEL") or None,
+class SeriesStyle(BaseModel):
+class ChapterPlan(BaseModel):
+class Outline(BaseModel):
+class ChapterDraft(BaseModel):
+class ChapterInfo(BaseModel):
+class LongScript(BaseModel):
+SYSTEM_PROMPT = (
+def clamp_minutes(minutes: float, cfg: LongConfig) -> float:
+def chapter_count(minutes: float) -> int:
+def chapter_targets(total_words: int, n: int) -> list[int]:
+    weights = [0.8 if i in (0, n - 1) else 1.0 for i in range(n)]
+    s = sum(weights)
+def words_per_scene(cfg: LongConfig) -> float:
+def word_count(text: str) -> int:
+def split_scene(text: str, max_words: int) -> list[str]:
+    text = " ".join((text or "").split())
+    sentences = re.split(r"(?<=[.!?\u0964\u06d4\u061f])\s+", text)
+        sw = s.split()
+            cur = []
+def _style_block(style: SeriesStyle) -> str:
+    lines = [f"Narrator voice: {style.narrator}.", f"Tone: {style.tone}.", f"Audience: {style.audience}."]
+def _facts_block(facts) -> str:
+def outline_prompt(topic, language, minutes, n_chapters, style, note="") -> str:
+def chapter_prompt(topic, language, style, outline, idx, target_words, target_scenes, prev_tail, note="", facts=None) -> str:
+    ch = outline.chapters[idx]
+    n = len(outline.chapters)
+    listing = "\n".join(f"{i + 1}. {c.title}: {c.summary}" for i, c in enumerate(outline.chapters))
+    points = "\n".join(f"- {p}" for p in ch.key_points) or "- (cover the summary)"
+    opening = (f"This is the FIRST chapter. Start with this hook, naturally: {outline.hook}\n" if idx == 0 else "")
+    closing = ("This is the LAST chapter. End with a short, satisfying conclusion and a light invitation to "
+    prev = f"The previous chapter ended with: \"{prev_tail}\"\nContinue smoothly from it.\n" if prev_tail else ""
+def _ask(client, prompt, schema, temperature):
+def _load(path, model):
+def _save(path, model):
+def make_client(cfg: LongConfig | None = None):
+    cfg = cfg or LongConfig.from_env()
+def get_outline(topic, client, minutes, language, style, cfg, run_dir, progress, warnings) -> Outline:
+    path = Path(run_dir) / "long_outline.json" if run_dir else None
+    outline = _load(path, Outline)
+    want = chapter_count(minutes)
+    note = ""
+        outline = _ask(client, outline_prompt(topic, language, minutes, want, style, note), Outline, 0.8)
+        chapters = [c for c in outline.chapters if c.title.strip()]
+            outline = outline.model_copy(update={"chapters": chapters})
+        note = f"\nIMPORTANT: your last answer had {len(chapters)} chapters; give exactly {want}."
+def get_chapter(topic, client, language, style, outline, idx, target_words, cfg, run_dir, prev_tail, progress, warnings, facts=None):
+    path = Path(run_dir) / f"long_chapter_{idx + 1:02d}.json" if run_dir else None
+    draft = _load(path, ChapterDraft)
+    title = outline.chapters[idx].title
+    target_scenes = max(2, round(target_words / words_per_scene(cfg)))
+    note = ""
+    best = None
+        draft = _ask(client, chapter_prompt(topic, language, style, outline, idx, target_words, target_scenes,
+        scenes = [s for s in draft.scenes if word_count(s.narration) > 0]
+        words = sum(word_count(s.narration) for s in scenes)
+            best = ChapterDraft(scenes=scenes)
+        note = (f"\nIMPORTANT: your last answer had {words} words; write about {target_words} words "
+    words = sum(word_count(s.narration) for s in best.scenes) if best else 0
+def generate_long_script(topic, client, minutes=10, language="English", style=None, run_dir=None,
+                         cfg=None, progress=print, researcher=None) -> LongScript:
+    topic = " ".join((topic or "").split())
+    cfg = cfg or LongConfig.from_env()
+    style = style or SeriesStyle()
+    minutes = clamp_minutes(minutes, cfg)
+    outline = get_outline(topic, client, minutes, language, style, cfg, run_dir, progress, warnings)
+    research = researcher(outline) if researcher else None
+    total_words = int(minutes * cfg.words_per_minute)
+    targets = chapter_targets(total_words, len(outline.chapters))
+    wps = cfg.words_per_minute / 60
+    prev_tail = ""
+        draft = get_chapter(topic, client, language, style, outline, idx, target, cfg, run_dir, prev_tail,
+        first = len(scenes) + 1
+        ch_words = 0
+            query = " ".join((sd.search_query or "").split()) or outline.chapters[idx].title
+            visual = " ".join((sd.visual_description or "").split()) or query
+                n = word_count(piece)
+                                    search_query=query, duration=round(max(n / wps, 1.5), 2)))
+                                 last_scene=len(scenes), words=ch_words))
+        prev_tail = " ".join(scenes[-1].narration.split()[-30:])
+    board = Storyboard(title=outline.title, hook=outline.hook, language=language, scenes=scenes)
+    result = LongScript(storyboard=board, chapters=infos, minutes=minutes,
+                        words=sum(i.words for i in infos), warnings=warnings)
+### long_validation.py
+class Issue(BaseModel):
+class ValidationReport(BaseModel):
+    def errors(self) -> list[Issue]:
+    def warnings(self) -> list[Issue]:
+    def ok(self) -> bool:
+def _norm(text: str) -> str:
+def validate_script(script: LongScript, cfg: LongConfig | None = None) -> ValidationReport:
+    cfg = cfg or LongConfig.from_env()
+    def add(level, msg):
+    board = script.storyboard
+    scenes = board.scenes
+    words = sum(word_count(s.narration) for s in scenes)
+    target = script.minutes * cfg.words_per_minute
+    ratio = words / target if target else 0
+    durations = [s.duration for s in scenes]
+    avg = sum(durations) / len(durations)
+    long_scenes = sum(1 for d in durations if d > 15)
+        mean = sum(c.words for c in script.chapters) / len(script.chapters)
+    hook = (board.hook or "").strip()
+        hook_words = {w.strip(".,!?;:\"'").lower() for w in hook.split() if len(w) > 3}
+        opening = {w.strip(".,!?;:\"'").lower() for s in scenes[:3] for w in s.narration.split()}
+        key = _norm(s.narration)
+    queries = [_norm(s.search_query) for s in scenes]
+def save_validation(report: ValidationReport, run_dir) -> None:
+### long_visuals.py
+class VisualReport(BaseModel):
+    def ok(self) -> bool:
+    def summary(self) -> str:
+class CreditEntry(BaseModel):
+def _norm(text) -> str:
+def build_visual_report(board, clips) -> VisualReport:
+    by_scene = {c.scene_number: c for c in clips}
+    rep = VisualReport(scenes=len(board.scenes))
+    prev = None
+    title = _norm(board.title)
+        c = by_scene.get(s.number)
+            prev = None
+        prev = c.clip_id
+    n = max(rep.scenes, 1)
+def build_credits(clips) -> list[CreditEntry]:
+        e = out.get(c.clip_id)
+            e = out[c.clip_id] = CreditEntry(
+                clip_id=c.clip_id, provider=getattr(c, "provider", "Pixabay"),
+                license=getattr(c, "license", "Pixabay License"), author=getattr(c, "author", ""),
+                page_url=c.page_url)
+def credits_text(credits) -> str:
+    authors = sorted({c.author for c in credits if c.author}, key=str.lower)[:15]
+    line = "Stock footage: Pixabay (https://pixabay.com), Pixabay License."
+def save_visuals(run_dir, board, clips):
+    rep = build_visual_report(board, clips)
+    credits = build_credits(clips)
+    run = Path(run_dir)
+                                             encoding="utf-8")
+### video_editor.py
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".aac")
+TRANSITIONS = ("fade", "slideleft", "wipeleft", "slideright")
+CAPTIONS_FILE = "captions.ass"
+class VideoError(RuntimeError):
+def run_ffmpeg(args, cwd=None) -> None:
+    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
+def effective_transition(durations: list[float], transition: float) -> float:
+LEADING_BLACK_MAX = 2.0  # is se zyada kala ho to clip ko chhedna theek nahi (clip hi andheri ho sakti hai)
+def detect_leading_black(path, runner=subprocess.run) -> float:
+        result = runner(
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+def segment_args(clip_path, duration: float, out_path, width: int, height: int, fps: int, crf: int,
+    vf = (
+def build_filter_complex(
+    transitions=TRANSITIONS,
+    n = len(durations)
+    total = sum(durations)
+    t = effective_transition(durations, transition)
+    last = "[0:v]"
+    offset = 0.0
+        tr = transitions[(k - 1) % len(transitions)]
+        label = f"[v{k}]"
+        last = label
+    ass = "ass=" + CAPTIONS_FILE + (":fontsdir=fonts" if fonts else "")
+    stereo = "aresample=44100,aformat=channel_layouts=stereo"
+    voice = f"[{n}:a]"
+        music_label = None
+        sfx_label = None
+            fade_start = max(0.0, total - 1.5)
+            music_label = "music"
+            idx = sfx_index if sfx_index is not None else n + 1 + (1 if music else 0)
+def pick_music(music_dir, rng=random) -> Path | None:
+    folder = Path(music_dir)
+    tracks = sorted(p for p in folder.iterdir() if p.suffix.lower() in AUDIO_EXTS)
+def prepare_fonts(fonts_dir, work_dir) -> bool:
+    src = Path(fonts_dir)
+    fonts = [p for p in src.iterdir() if p.suffix.lower() in (".ttf", ".otf", ".ttc")] if src.is_dir() else []
+    dest = Path(work_dir) / "fonts"
+def render_video(
+    music_dir=None,
+    fonts_dir=None,
+    branding=None,
+    runner=run_ffmpeg,
+    rng=random,
+    black_fn=detect_leading_black,
+    width = width or settings.video_width
+    height = height or settings.video_height
+    fps = fps or settings.video_fps
+    board = apply_durations(board, voiceover)  # voiceover ki asli durations
+    by_scene = {c.scene_number: c for c in clips}
+    missing = [s.number for s in board.scenes if s.number not in by_scene]
+    durations = [s.duration for s in board.scenes]
+    total = round(sum(durations), 3)
+    t = effective_transition(durations, transition)
+    out_dir = Path(out_dir)
+    seg_dir = out_dir / "segments"
+        seg = (seg_dir / f"seg_{scene.number:02d}.mp4").resolve()
+        length = scene.duration + (t if i < len(board.scenes) - 1 else 0.0)
+        clip_path = Path(by_scene[scene.number].path).resolve()
+        start = black_fn(clip_path)
+    style = caption_style(board.language, fonts_dir or settings.fonts_dir)
+    ass_extra = {}
+        ass_extra = {"highlight_color": branding.highlight_color, "text_color": branding.text_color}
+    has_fonts = prepare_fonts(fonts_dir or settings.fonts_dir, out_dir)
+    mdir = music_dir or settings.music_dir
+    mood = mood_from_text(" ".join([board.title, board.hook, board.full_narration]))
+    music = pick_track(mdir, mood, rng)
+        music_volume = 0.25 if duck else 0.12
+    whoosh = ensure_whoosh(Path(settings.music_dir).parent / "cache" / "sfx") if sfx else None
+    sfx_starts = transition_starts(durations, t) if whoosh is not None else []
+    sfx_index = len(board.scenes) + 1 + (1 if music is not None else 0)
+    brand_dir = Path(settings.music_dir).parent / "branding"
+    logo = resolve_file(branding.logo_path, brand_dir) if branding is not None else None
+    logo_index = (len(board.scenes) + 1 + (1 if music is not None else 0) + (1 if sfx_starts else 0)
+    logo_opts = ({"position": branding.logo_position, "opacity": branding.logo_opacity,
+    fc = build_filter_complex(durations, transition, music=music is not None,
+                              music_volume=music_volume, fonts=has_fonts,
+                              duck=duck, sfx_starts=sfx_starts, sfx_index=sfx_index,
+                              logo_index=logo_index, logo_opts=logo_opts, video_width=width)
+    out_path = (out_dir / "video.mp4").resolve()
+    cmd = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error"]
+        intro = resolve_file(branding.intro_path, brand_dir)
+        outro = resolve_file(branding.outro_path, brand_dir)
+            out_path = add_intro_outro(out_path, intro, outro, out_dir, width, height, fps)
+def probe_video(path) -> dict:
+    result = subprocess.run(
+        capture_output=True, text=True,
+    data = json.loads(result.stdout)
+    stream = data["streams"][0]
+### captions.py
+SENTENCE_END = (".", "!", "?", "\u06d4", "\u061f", "\u0964", "\u0965")
+HL_ON = "{\\c&H00FFFF&}"   # peela (BGR order)
+HL_OFF = "{\\c&HFFFFFF&}"  # safed
+def fmt_time(seconds: float) -> str:
+    cs = max(0, round(seconds * 100))
+def group_words(words: list[WordTiming], max_words: int = 3, max_chars: int = 18) -> list[list[WordTiming]]:
+        text = w.text.strip()
+        cur_chars = sum(len(x.text.strip()) for x in cur) + len(cur)
+            cur = []
+            cur = []
+def _esc(text: str) -> str:
+def build_ass(
+    hl_on = ass_tag_color(highlight_color) if highlight_color else HL_ON
+    hl_off = ass_tag_color(text_color) if text_color else HL_OFF
+    primary = ass_style_color(text_color) if text_color else "&H00FFFFFF"
+    lines = [
+        texts = [_esc(w.text.upper() if uppercase else w.text) for w in group]
+            start = w.start
+            end = group[i + 1].start if i + 1 < len(group) else w.end
+            end = max(end, start + 0.05)
+            shown = [hl_on + t + hl_off if j == i else t for j, t in enumerate(texts)]
+            text = " ".join(shown)
+### audio_mix.py
+FMT = "aformat=sample_rates=44100:channel_layouts=stereo"
+def sfx_filters(starts: list[float], sfx_index: int, volume: float = 0.35, out_label: str = "sfx"):
+    n = len(starts)
+        ms = int(starts[0] * 1000)
+    split = "".join(f"[sx{i}]" for i in range(n))
+    parts = [f"[{sfx_index}:a]{FMT},asplit={n}{split}"]
+        ms = int(s * 1000)
+    ins = "".join(f"[sd{i}]" for i in range(n))
+def build_audio_graph(voice: str, music: str | None = None, sfx: str | None = None,
+    ins = [v] + ([m] if m else []) + ([sfx] if sfx else [])
+        joined = "".join(f"[{i}]" for i in ins)
+### music.py
+AUDIO_EXT = {".mp3", ".wav", ".m4a", ".ogg"}
+MOODS = ("calm", "upbeat", "dramatic", "mysterious", "inspiring")
+KEYWORDS = {
+def track_mood(path, root) -> str | None:
+    p = Path(path)
+        rel = p.relative_to(root)
+    prefix = re.split(r"[_\- ]", p.stem.lower())[0]
+def list_tracks(music_dir) -> dict[str, list[Path]]:
+    root = Path(music_dir)
+def mood_from_text(text: str, default: str = "calm") -> str:
+    low = (text or "").lower()
+    scores = {m: sum(low.count(k) for k in kws) for m, kws in KEYWORDS.items()}
+    best = max(scores, key=scores.get)
+def pick_track(music_dir, mood: str | None = None, rng=random) -> Path | None:
+    tracks = list_tracks(music_dir)
+    pool = tracks.get(mood, []) if mood else []
+        pool = tracks.get("any", []) or [p for v in tracks.values() for p in v]
+### sfx.py
+def whoosh_args(out_path, duration: float = 0.5) -> list[str]:
+    fade_out = max(duration - 0.25, 0.05)
+def ensure_whoosh(cache_dir, runner=subprocess.run) -> Path | None:
+    out = Path(cache_dir) / "whoosh.wav"
+        r = runner(["ffmpeg", "-hide_banner", "-loglevel", "error", *whoosh_args(out)],
+                   capture_output=True, text=True)
+def transition_starts(durations: list[float], transition: float, lead: float = 0.1) -> list[float]:
+        offset = total - (i + 1) * transition
+### config.py
+BASE_DIR = Path(__file__).resolve().parents[2]
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    def ensure_dirs(self) -> None:
+    def missing_keys(self) -> list[str]:
+        missing = []
+settings = Settings()
+def _mask(value: str) -> str:
+### db.py
+MIGRATIONS = [
+class NotFoundError(LookupError):
+class DuplicateChannelError(ValueError):
+class InvalidTransitionError(RuntimeError):
+    def __init__(self, current: str, target: str):
+def _now() -> str:
+def connect(db_path):
+    con = sqlite3.connect(str(db_path), timeout=30)
+def init_db(db_path) -> None:
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+def create_channel(db_path, name: str, niche: str = "", language: str = "English", voice=None) -> dict:
+    name = " ".join(name.split())
+            cur = con.execute(
+def list_channels(db_path) -> list[dict]:
+def get_channel(db_path, channel_id: int) -> dict | None:
+        row = con.execute("SELECT * FROM channels WHERE id = ?", (channel_id,)).fetchone()
+def delete_channel(db_path, channel_id: int) -> bool:
+def create_job(db_path, channel_id, topic: str, language: str) -> int:
+    now = _now()
+        cur = con.execute(
+def get_video(db_path, video_id: int) -> dict | None:
+        row = con.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+def list_videos(db_path, status=None, channel_id=None, limit: int = 50) -> list[dict]:
+    sql = "SELECT * FROM videos"
+def transition(db_path, video_id: int, new_status: str, allowed_from) -> dict:
+        row = con.execute("SELECT status FROM videos WHERE id = ?", (video_id,)).fetchone()
+def finish_video(db_path, video_id: int, result) -> None:
+        cur = con.execute(
+def fail_video(db_path, video_id: int, error: str) -> None:
+def used_topics(db_path, channel_id) -> list[str]:
+        rows = con.execute(
+def mark_stale_jobs(db_path) -> int:
+def stats(db_path) -> dict:
+        rows = con.execute("SELECT status, COUNT(*) AS n FROM videos GROUP BY status").fetchall()
+    result = {r["status"]: r["n"] for r in rows}
+def set_channel_branding(db_path, channel_id: int, branding_json) -> bool:
+def set_run_dir(db_path, video_id: int, run_dir) -> None:
+### storyboard.py
+WORDS_PER_SECOND = 2.5
+MIN_SCENE_SECONDS = 2.0
+def estimate_duration(text: str) -> float:
+    words = len(text.split())
+def build_storyboard(draft: ScriptDraft, language: str = "English") -> Storyboard:
+        narration = " ".join(item.narration.split())
+        query = " ".join(item.search_query.split()) or draft.title.strip()
+                number=len(scenes) + 1,
+                narration=narration,
+                visual_description=" ".join(item.visual_description.split()),
+                search_query=query,
+                duration=estimate_duration(narration),
+        title=draft.title.strip(),
+        hook=draft.hook.strip(),
+        language=language,
+        scenes=scenes,
+
+FullName                                                                                                          
+--------                                                                                                          
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio                
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fonts                
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments             
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\captions.ass         
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\clips.json           
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fact_check.json      
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\quality.json         
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\result.json          
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\seo.json             
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\storyboard.json      
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\thumbnail.jpg        
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\thumb_frame.jpg      
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\video.mp4            
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\voiceover.json       
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_01.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_02.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_03.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_04.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_05.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_06.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_07.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\scene_08.mp3   
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\audio\voiceover.mp3  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fonts\arial.ttf      
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fonts\arialbd.ttf    
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fonts\NotoNaskhAra...
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\fonts\NotoSansDeva...
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_01.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_02.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_03.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_04.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_05.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_06.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_07.mp4  
+E:\YouTube_AI_Automation\output\runs\20261107_212505_why_you_would_instantly_freeze_and_boil\segments\seg_08.mp4  
+
+

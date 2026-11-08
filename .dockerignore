@@ -1,0 +1,9 @@
+.venv
+.env
+client_secret*.json
+output
+logs
+__pycache__
+.pytest_cache
+data/tokens
+*.bak
