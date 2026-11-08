@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Faceless Video AI
 
 Ek topic se publish-ready YouTube video: research, script, voiceover, visuals, editing, captions, thumbnail, SEO, fact-check, quality check aur publishing. **Shorts (9:16) ka workflow implement hai.** **Long-form (16:9, 10-20 minute) ka end-to-end workflow bhi taiyar hai: research se render, QA, YouTube package aur publish tak.**
@@ -421,3 +422,7 @@ Ye ek hi README hai. Har step ke baad:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+=======
+# Faceless-Video-AI-Automation
+AI-powered automation system that transforms a single topic into complete, high-quality faceless videos for YouTube Shorts, Reels, and TikTok — automating research, scriptwriting, AI voiceovers, visuals, video editing, captions, thumbnails, SEO, and publishing.
+>>>>>>> 800f1fb09bf6cbaa6584b1b43d8f429101ddb1a7
